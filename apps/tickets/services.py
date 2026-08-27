@@ -11,7 +11,8 @@ from .exceptions import (
     TicketAlreadyAssigned,
     TicketPermissionDenied,
 )
-from .models import Ticket, TicketHistory
+from .models import Ticket, TicketComment, TicketHistory
+from .sla import apply_sla_policy, recalculate_sla_deadlines, resolve_sla_policy
 from .tasks import notify_ticket_event
 
 ALLOWED_TRANSITIONS = {
@@ -49,7 +50,11 @@ def _history(ticket, actor, action, field="", old_value="", new_value=""):
 
 @transaction.atomic
 def create_ticket(*, requester: User, **data) -> Ticket:
+    priority = data.get("priority", Ticket.Priority.MEDIUM)
+    policy = resolve_sla_policy(priority)
     ticket = Ticket.objects.create(requester=requester, status=Ticket.Status.OPEN, **data)
+    apply_sla_policy(ticket, policy)
+    ticket.save(update_fields=["first_response_due_at", "resolution_due_at", "updated_at"])
     _history(ticket, requester, TicketHistory.Action.CREATED, new_value=Ticket.Status.OPEN)
     _notify_after_commit(ticket, "created")
     return ticket
@@ -107,11 +112,41 @@ def transition_ticket(*, ticket: Ticket, target_status: str, actor: User) -> Tic
     now = timezone.now()
     if target_status == Ticket.Status.RESOLVED:
         locked.resolved_at = now
+        if locked.first_resolved_at is None:
+            locked.first_resolved_at = now
+            _history(
+                locked,
+                actor,
+                TicketHistory.Action.SLA_RESOLUTION_COMPLETED,
+                "sla",
+                new_value=now.isoformat(),
+            )
+            if locked.resolution_due_at and now > locked.resolution_due_at:
+                locked.sla_resolution_breached_at = now
+                _history(
+                    locked,
+                    actor,
+                    TicketHistory.Action.SLA_RESOLUTION_BREACHED,
+                    "sla",
+                    new_value=now.isoformat(),
+                )
+                _notify_after_commit(locked, "sla_resolution_breached")
+            else:
+                _notify_after_commit(locked, "sla_resolution_met")
     elif old_status == Ticket.Status.RESOLVED and target_status == Ticket.Status.IN_PROGRESS:
         locked.resolved_at = None
     if target_status == Ticket.Status.CLOSED:
         locked.closed_at = now
-    locked.save(update_fields=["status", "resolved_at", "closed_at", "updated_at"])
+    locked.save(
+        update_fields=[
+            "status",
+            "resolved_at",
+            "first_resolved_at",
+            "closed_at",
+            "sla_resolution_breached_at",
+            "updated_at",
+        ]
+    )
     _history(
         locked,
         actor,
@@ -145,6 +180,45 @@ def update_ticket(*, ticket: Ticket, actor: User, data: dict) -> Ticket:
         changed_fields.append(field)
         action, normalizer = actions[field]
         _history(locked, actor, action, field, normalizer(old_value), normalizer(value))
+        if field == "priority":
+            recalculate_sla_deadlines(locked, value)
+            changed_fields.extend(["first_response_due_at", "resolution_due_at"])
     if changed_fields:
         locked.save(update_fields=[*changed_fields, "updated_at"])
     return locked
+
+
+@transaction.atomic
+def add_ticket_comment(*, ticket: Ticket, author: User, content: str) -> TicketComment:
+    locked = Ticket.objects.select_for_update().get(pk=ticket.pk)
+    comment = TicketComment.objects.create(ticket=locked, author=author, content=content)
+    if author.role in {User.Role.AGENT, User.Role.ADMIN} and locked.first_responded_at is None:
+        now = timezone.now()
+        locked.first_responded_at = now
+        _history(
+            locked,
+            author,
+            TicketHistory.Action.SLA_FIRST_RESPONSE_COMPLETED,
+            "sla",
+            new_value=now.isoformat(),
+        )
+        if locked.first_response_due_at and now > locked.first_response_due_at:
+            locked.sla_first_response_breached_at = now
+            _history(
+                locked,
+                author,
+                TicketHistory.Action.SLA_FIRST_RESPONSE_BREACHED,
+                "sla",
+                new_value=now.isoformat(),
+            )
+            _notify_after_commit(locked, "sla_first_response_breached")
+        else:
+            _notify_after_commit(locked, "sla_first_response_met")
+        locked.save(
+            update_fields=[
+                "first_responded_at",
+                "sla_first_response_breached_at",
+                "updated_at",
+            ]
+        )
+    return comment

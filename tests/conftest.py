@@ -2,7 +2,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
-from apps.tickets.models import Ticket, TicketCategory
+from apps.tickets.models import SLAPolicy, Ticket, TicketCategory
 
 
 @pytest.fixture
@@ -47,6 +47,21 @@ def admin_user(user_factory):
 
 @pytest.fixture
 def category(db):
+    defaults = {
+        Ticket.Priority.LOW: (1440, 7200),
+        Ticket.Priority.MEDIUM: (480, 4320),
+        Ticket.Priority.HIGH: (240, 1440),
+        Ticket.Priority.URGENT: (60, 480),
+    }
+    for priority, (first_response, resolution) in defaults.items():
+        SLAPolicy.objects.get_or_create(
+            priority=priority,
+            defaults={
+                "name": f"Default {priority}",
+                "first_response_minutes": first_response,
+                "resolution_minutes": resolution,
+            },
+        )
     return TicketCategory.objects.create(name="Software", slug="software")
 
 

@@ -1,7 +1,7 @@
 # ServiceFlow API
 
 ServiceFlow is a portfolio-ready REST API for managing support tickets. It demonstrates more
-than CRUD: role-based object access, explicit workflow rules, transactional audit history,
+than CRUD: role-based object access, explicit workflow and SLA rules, transactional audit history,
 concurrency-safe ownership, JWT authentication, asynchronous notifications, and documented APIs.
 
 ## Stack
@@ -37,6 +37,10 @@ transactions and prevents two agents from silently taking the same ticket.
 docker compose up -d --build
 docker compose exec api python manage.py seed_dev
 ```
+
+The Compose stack runs PostgreSQL, Redis, the Gunicorn API, a Celery worker and one Celery Beat
+instance. Beat is intentionally single-instance in development; row locking and idempotent breach
+writes still protect against overlapping task executions.
 
 Open Swagger at <http://localhost:8000/api/docs/> and health at
 <http://localhost:8000/health/>. Stop the stack with `docker compose down`.
@@ -83,6 +87,9 @@ settings. Secrets and the real `.env` are intentionally excluded from Git.
 | GET | `/api/v1/tickets/{public_id}/history/` | Read-only audit trail |
 | GET | `/api/v1/categories/` | Active and inactive categories |
 | POST, PATCH | `/api/v1/categories/` | Admin category management |
+| GET | `/api/v1/sla-policies/` | Agent/admin policy lookup |
+| POST, PATCH | `/api/v1/sla-policies/` | Admin policy management |
+| GET | `/api/v1/metrics/` | Operator ticket and SLA metrics |
 
 Ticket listing supports `status`, `priority`, category slug, assignee and requester filters;
 `search` over title/description; controlled `ordering`; and page-number pagination (20 by default,
@@ -119,6 +126,58 @@ RESOLVED
 
 Closed and cancelled tickets are terminal. Resolution and closure timestamps are server-owned.
 Every important state, priority, category, assignment, and field change receives an audit entry.
+
+## SLA Management
+
+SLA uses elapsed calendar time. Business hours, holidays and regional calendars are intentionally
+outside this phase. One active persisted policy defines first-response and resolution targets for
+each priority:
+
+| Priority | First response | Resolution |
+|---|---:|---:|
+| Low | 24 hours | 120 hours |
+| Medium | 8 hours | 72 hours |
+| High | 4 hours | 24 hours |
+| Urgent | 1 hour | 8 hours |
+
+Creating a ticket requires an active policy. Its deadlines are calculated from `created_at` and
+stored on the ticket, so later policy edits never silently rewrite historical commitments. An
+explicit priority change is different: it intentionally recalculates both deadlines from the
+original creation timestamp using the newly applicable policy. If that makes the ticket overdue,
+the breach is recorded in the same transaction.
+
+The first agent or administrator comment completes First Response SLA; requester comments do not.
+`first_resolved_at` records the first resolution permanently for Resolution SLA, while
+`resolved_at` still describes the current state and is cleared on reopening. Completion at or
+before the deadline is met; later completion is breached. Cancellation stops future checks but
+preserves breaches already recorded.
+
+```text
+Ticket created
+      │
+      ▼
+Resolve active policy → calculate and persist deadlines
+      │
+      ▼
+Celery Beat checks overdue candidates every minute
+      │
+      ├── no breach → no write
+      └── breach → row lock → timestamp + history → commit → notification task
+```
+
+Candidate selection happens in the database. Each update rechecks a locked row and only writes an
+empty breach timestamp, making repeated or concurrent checks idempotent: timestamps, history and
+notifications are not duplicated. The interval is controlled by `CELERY_BEAT_SCHEDULE` in Django
+settings. Inspect processing with:
+
+```bash
+docker compose logs -f worker beat
+```
+
+Ticket details expose frozen deadlines, completion/breach timestamps and readable `pending`,
+`met`, `breached` or `not_applicable` statuses. Operators can use `?sla_status=breached` or
+`?overdue=true`; `/api/v1/metrics/` returns status counts, breach counts and database-calculated
+average response/resolution durations.
 
 ## Quality checks
 

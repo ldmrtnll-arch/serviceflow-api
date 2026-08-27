@@ -22,3 +22,8 @@ class TicketAlreadyAssigned(TicketDomainError):
 class TicketPermissionDenied(TicketDomainError):
     code = "permission_denied"
     status_code = status.HTTP_403_FORBIDDEN
+
+
+class SLAPolicyNotConfigured(TicketDomainError):
+    code = "sla_policy_not_configured"
+    status_code = status.HTTP_409_CONFLICT

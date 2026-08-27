@@ -73,6 +73,22 @@ services:
       redis:
         condition: service_healthy
 
+  beat:
+    build: .
+    command: celery -A config beat --loglevel=info --schedule=/tmp/celerybeat-schedule
+    environment:
+      DJANGO_SECRET_KEY: local-docker-secret-change-in-production
+      DJANGO_DEBUG: "false"
+      DATABASE_URL: postgresql://serviceflow:serviceflow@db:5432/serviceflow
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:

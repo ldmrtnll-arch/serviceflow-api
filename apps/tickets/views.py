@@ -1,16 +1,18 @@
-from django.db.models import QuerySet
+from django.db.models import Avg, Count, DurationField, ExpressionWrapper, F, Q, QuerySet
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.accounts.models import User
 
 from .filters import TicketFilter
-from .models import Ticket, TicketCategory
-from .permissions import IsAdminOrReadOnly
+from .models import SLAPolicy, Ticket, TicketCategory
+from .permissions import IsAdminOrReadOnly, IsOperator, SLAPolicyPermission
 from .serializers import (
     CategorySerializer,
+    SLAPolicySerializer,
     TicketAssignmentSerializer,
     TicketCommentSerializer,
     TicketCreateSerializer,
@@ -20,7 +22,14 @@ from .serializers import (
     TicketTransitionSerializer,
     TicketUpdateSerializer,
 )
-from .services import assign_ticket, create_ticket, take_ownership, transition_ticket, update_ticket
+from .services import (
+    add_ticket_comment,
+    assign_ticket,
+    create_ticket,
+    take_ownership,
+    transition_ticket,
+    update_ticket,
+)
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -30,6 +39,15 @@ class CategoryViewSet(viewsets.ModelViewSet):
     lookup_field = "slug"
     search_fields = ("name", "description")
     ordering_fields = ("name", "created_at")
+    http_method_names = ("get", "post", "patch", "head", "options")
+
+
+class SLAPolicyViewSet(viewsets.ModelViewSet):
+    queryset = SLAPolicy.objects.all()
+    serializer_class = SLAPolicySerializer
+    permission_classes = [SLAPolicyPermission]
+    filterset_fields = ("priority", "is_active")
+    ordering_fields = ("priority", "created_at")
     http_method_names = ("get", "post", "patch", "head", "options")
 
 
@@ -119,8 +137,10 @@ class TicketViewSet(
         if request.method == "POST":
             serializer = TicketCommentSerializer(data=request.data)
             serializer.is_valid(raise_exception=True)
-            serializer.save(ticket=ticket, author=request.user)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            comment = add_ticket_comment(
+                ticket=ticket, author=request.user, content=serializer.validated_data["content"]
+            )
+            return Response(TicketCommentSerializer(comment).data, status=status.HTTP_201_CREATED)
         comments = ticket.comments.select_related("author")
         page = self.paginate_queryset(comments)
         serializer = TicketCommentSerializer(page, many=True)
@@ -133,3 +153,44 @@ class TicketViewSet(
         page = self.paginate_queryset(entries)
         serializer = TicketHistorySerializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+
+
+class TicketMetricsView(APIView):
+    permission_classes = [IsOperator]
+
+    @extend_schema(responses=dict)
+    def get(self, request):
+        response_time = ExpressionWrapper(
+            F("first_responded_at") - F("created_at"), output_field=DurationField()
+        )
+        resolution_time = ExpressionWrapper(
+            F("first_resolved_at") - F("created_at"), output_field=DurationField()
+        )
+        metrics = Ticket.objects.aggregate(
+            total=Count("id"),
+            open=Count("id", filter=Q(status=Ticket.Status.OPEN)),
+            in_progress=Count("id", filter=Q(status=Ticket.Status.IN_PROGRESS)),
+            waiting_requester=Count("id", filter=Q(status=Ticket.Status.WAITING_REQUESTER)),
+            resolved=Count("id", filter=Q(status=Ticket.Status.RESOLVED)),
+            closed=Count("id", filter=Q(status=Ticket.Status.CLOSED)),
+            cancelled=Count("id", filter=Q(status=Ticket.Status.CANCELLED)),
+            first_response_breached=Count(
+                "id", filter=Q(sla_first_response_breached_at__isnull=False)
+            ),
+            resolution_breached=Count("id", filter=Q(sla_resolution_breached_at__isnull=False)),
+            average_first_response=Avg(response_time),
+            average_resolution=Avg(resolution_time),
+        )
+        first_average = metrics.pop("average_first_response")
+        resolution_average = metrics.pop("average_resolution")
+        metrics["sla"] = {
+            "first_response_breached": metrics.pop("first_response_breached"),
+            "resolution_breached": metrics.pop("resolution_breached"),
+            "average_first_response_seconds": (
+                first_average.total_seconds() if first_average else None
+            ),
+            "average_resolution_seconds": (
+                resolution_average.total_seconds() if resolution_average else None
+            ),
+        }
+        return Response(metrics)
