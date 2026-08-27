@@ -1,19 +1,27 @@
 from django.db.models import Avg, Count, DurationField, ExpressionWrapper, F, Q, QuerySet
-from drf_spectacular.utils import extend_schema
+from django.shortcuts import get_object_or_404
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import User
 
+from .attachments import delete_attachment, upload_attachment
 from .filters import TicketFilter
 from .models import SLAPolicy, Ticket, TicketCategory
+from .object_storage import get_object_storage
 from .permissions import IsAdminOrReadOnly, IsOperator, SLAPolicyPermission
 from .serializers import (
     CategorySerializer,
     SLAPolicySerializer,
     TicketAssignmentSerializer,
+    TicketAttachmentDownloadSerializer,
+    TicketAttachmentSerializer,
+    TicketAttachmentUploadSerializer,
     TicketCommentSerializer,
     TicketCreateSerializer,
     TicketDetailSerializer,
@@ -66,7 +74,11 @@ class TicketViewSet(
     ordering_fields = ("created_at", "updated_at", "priority", "status")
 
     def get_queryset(self) -> QuerySet[Ticket]:
-        queryset = Ticket.objects.select_related("requester", "assignee", "category")
+        queryset = (
+            Ticket.objects.select_related("requester", "assignee", "category")
+            .annotate(attachment_count=Count("attachments", distinct=True))
+            .order_by("-created_at")
+        )
         if getattr(self, "swagger_fake_view", False):
             return queryset.none()
         if self.request.user.role == User.Role.REQUESTER:
@@ -153,6 +165,72 @@ class TicketViewSet(
         page = self.paginate_queryset(entries)
         serializer = TicketHistorySerializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+
+    @extend_schema(
+        request=TicketAttachmentUploadSerializer,
+        responses=TicketAttachmentSerializer(many=True),
+    )
+    @action(detail=True, methods=["get", "post"], parser_classes=[MultiPartParser])
+    def attachments(self, request, **kwargs):
+        ticket = self.get_object()
+        if request.method == "POST":
+            serializer = TicketAttachmentUploadSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            attachment = upload_attachment(
+                ticket=ticket,
+                uploaded_by=request.user,
+                uploaded_file=serializer.validated_data["file"],
+                storage=get_object_storage(),
+            )
+            return Response(
+                TicketAttachmentSerializer(attachment).data,
+                status=status.HTTP_201_CREATED,
+            )
+        attachments = ticket.attachments.select_related("uploaded_by")
+        page = self.paginate_queryset(attachments)
+        serializer = TicketAttachmentSerializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @extend_schema(
+        request=None,
+        responses=None,
+        parameters=[OpenApiParameter("attachment_id", OpenApiTypes.UUID, OpenApiParameter.PATH)],
+    )
+    @action(
+        detail=True,
+        methods=["delete"],
+        url_path=r"attachments/(?P<attachment_id>[^/.]+)",
+    )
+    def attachment_detail(self, request, attachment_id=None, **kwargs):
+        ticket = self.get_object()
+        attachment = get_object_or_404(
+            ticket.attachments.select_related("uploaded_by"), public_id=attachment_id
+        )
+        delete_attachment(
+            ticket=ticket,
+            attachment=attachment,
+            actor=request.user,
+            storage=get_object_storage(),
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @extend_schema(
+        request=None,
+        responses=TicketAttachmentDownloadSerializer,
+        parameters=[OpenApiParameter("attachment_id", OpenApiTypes.UUID, OpenApiParameter.PATH)],
+    )
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path=r"attachments/(?P<attachment_id>[^/.]+)/download",
+    )
+    def attachment_download(self, request, attachment_id=None, **kwargs):
+        ticket = self.get_object()
+        attachment = get_object_or_404(ticket.attachments, public_id=attachment_id)
+        download = get_object_storage().generate_download_url(
+            key=attachment.storage_key, filename=attachment.original_name
+        )
+        return Response({"url": download.url, "expires_in": download.expires_in})
 
 
 class TicketMetricsView(APIView):

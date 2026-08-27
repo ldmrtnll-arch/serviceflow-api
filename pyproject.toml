@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Ticket management and workflow API"
 requires-python = ">=3.12"
 dependencies = [
+  "boto3>=1.35,<2",
   "celery[redis]>=5.4,<6",
   "dj-database-url>=2.3,<3",
   "Django>=5.1,<5.3",
