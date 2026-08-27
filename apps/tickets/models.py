@@ -1,7 +1,17 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
+from django.utils import timezone
+
+
+class TicketPriority(models.TextChoices):
+    LOW = "low", "Low"
+    MEDIUM = "medium", "Medium"
+    HIGH = "high", "High"
+    URGENT = "urgent", "Urgent"
 
 
 class TicketCategory(models.Model):
@@ -20,6 +30,55 @@ class TicketCategory(models.Model):
         return self.name
 
 
+class SLAPolicy(models.Model):
+    name = models.CharField(max_length=100)
+    priority = models.CharField(max_length=10, choices=TicketPriority)
+    first_response_minutes = models.PositiveIntegerField()
+    resolution_minutes = models.PositiveIntegerField()
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("priority", "name")
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(first_response_minutes__gt=0), name="sla_first_response_positive"
+            ),
+            models.CheckConstraint(
+                condition=Q(resolution_minutes__gt=0), name="sla_resolution_positive"
+            ),
+            models.CheckConstraint(
+                condition=Q(resolution_minutes__gte=models.F("first_response_minutes")),
+                name="sla_resolution_after_response",
+            ),
+            models.UniqueConstraint(
+                fields=("priority",),
+                condition=Q(is_active=True),
+                name="unique_active_sla_per_priority",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.priority})"
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.first_response_minutes is not None and self.first_response_minutes <= 0:
+            errors["first_response_minutes"] = "Must be greater than zero."
+        if self.resolution_minutes is not None and self.resolution_minutes <= 0:
+            errors["resolution_minutes"] = "Must be greater than zero."
+        if (
+            self.first_response_minutes is not None
+            and self.resolution_minutes is not None
+            and self.resolution_minutes < self.first_response_minutes
+        ):
+            errors["resolution_minutes"] = "Must be at least the first response time."
+        if errors:
+            raise ValidationError(errors)
+
+
 class Ticket(models.Model):
     class Status(models.TextChoices):
         OPEN = "open", "Open"
@@ -29,11 +88,7 @@ class Ticket(models.Model):
         CLOSED = "closed", "Closed"
         CANCELLED = "cancelled", "Cancelled"
 
-    class Priority(models.TextChoices):
-        LOW = "low", "Low"
-        MEDIUM = "medium", "Medium"
-        HIGH = "high", "High"
-        URGENT = "urgent", "Urgent"
+    Priority = TicketPriority
 
     public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     title = models.CharField(max_length=200)
@@ -56,13 +111,46 @@ class Ticket(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    first_resolved_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    first_response_due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    resolution_due_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    first_responded_at = models.DateTimeField(null=True, blank=True)
+    sla_first_response_breached_at = models.DateTimeField(null=True, blank=True)
+    sla_resolution_breached_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ("-created_at",)
 
     def __str__(self):
         return f"{self.public_id}: {self.title}"
+
+    @property
+    def first_response_sla_status(self):
+        return self._sla_status(
+            completed_at=self.first_responded_at,
+            due_at=self.first_response_due_at,
+            breached_at=self.sla_first_response_breached_at,
+        )
+
+    @property
+    def resolution_sla_status(self):
+        return self._sla_status(
+            completed_at=self.first_resolved_at,
+            due_at=self.resolution_due_at,
+            breached_at=self.sla_resolution_breached_at,
+        )
+
+    def _sla_status(self, *, completed_at, due_at, breached_at):
+        if breached_at or (completed_at and due_at and completed_at > due_at):
+            return "breached"
+        if completed_at:
+            return "met"
+        if not due_at or self.status == self.Status.CANCELLED:
+            return "not_applicable"
+        if timezone.now() > due_at:
+            return "breached"
+        return "pending"
 
 
 class TicketComment(models.Model):
@@ -90,6 +178,16 @@ class TicketHistory(models.Model):
         ASSIGNED = "assigned", "Assigned"
         UNASSIGNED = "unassigned", "Unassigned"
         UPDATED = "updated", "Updated"
+        SLA_FIRST_RESPONSE_COMPLETED = (
+            "sla_first_response_completed",
+            "SLA first response completed",
+        )
+        SLA_RESOLUTION_COMPLETED = "sla_resolution_completed", "SLA resolution completed"
+        SLA_FIRST_RESPONSE_BREACHED = (
+            "sla_first_response_breached",
+            "SLA first response breached",
+        )
+        SLA_RESOLUTION_BREACHED = "sla_resolution_breached", "SLA resolution breached"
 
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name="history")
     actor = models.ForeignKey(

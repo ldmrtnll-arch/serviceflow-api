@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Ticket, TicketCategory, TicketComment, TicketHistory
+from .models import SLAPolicy, Ticket, TicketCategory, TicketComment, TicketHistory
 
 
 @admin.register(TicketCategory)
@@ -11,12 +11,37 @@ class TicketCategoryAdmin(admin.ModelAdmin):
     prepopulated_fields = {"slug": ("name",)}
 
 
+@admin.register(SLAPolicy)
+class SLAPolicyAdmin(admin.ModelAdmin):
+    list_display = (
+        "name",
+        "priority",
+        "first_response_minutes",
+        "resolution_minutes",
+        "is_active",
+    )
+    list_filter = ("priority", "is_active")
+    search_fields = ("name",)
+
+
 @admin.register(Ticket)
 class TicketAdmin(admin.ModelAdmin):
     list_display = ("public_id", "title", "status", "priority", "requester", "assignee")
     list_filter = ("status", "priority", "category")
     search_fields = ("public_id", "title", "description", "requester__email")
-    readonly_fields = ("public_id", "created_at", "updated_at", "resolved_at", "closed_at")
+    readonly_fields = (
+        "public_id",
+        "created_at",
+        "updated_at",
+        "resolved_at",
+        "first_resolved_at",
+        "closed_at",
+        "first_response_due_at",
+        "resolution_due_at",
+        "first_responded_at",
+        "sla_first_response_breached_at",
+        "sla_resolution_breached_at",
+    )
     list_select_related = ("requester", "assignee", "category")
 
 
