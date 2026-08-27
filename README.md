@@ -7,7 +7,7 @@ concurrency-safe ownership, JWT authentication, asynchronous notifications, and 
 ## Stack
 
 - Python 3.12, Django 5, Django REST Framework
-- PostgreSQL, Redis, Celery
+- PostgreSQL, Redis, Celery, MinIO/S3-compatible object storage
 - SimpleJWT, django-filter, drf-spectacular
 - pytest, coverage, Ruff
 - Docker Compose and GitHub Actions
@@ -38,12 +38,15 @@ docker compose up -d --build
 docker compose exec api python manage.py seed_dev
 ```
 
-The Compose stack runs PostgreSQL, Redis, the Gunicorn API, a Celery worker and one Celery Beat
-instance. Beat is intentionally single-instance in development; row locking and idempotent breach
-writes still protect against overlapping task executions.
+The Compose stack runs PostgreSQL, Redis, private MinIO object storage, the Gunicorn API, a Celery
+worker and one Celery Beat instance. The `minio-init` container idempotently creates the private
+`serviceflow-attachments` bucket. Beat is intentionally single-instance in development; row
+locking and idempotent breach writes still protect against overlapping task executions.
 
 Open Swagger at <http://localhost:8000/api/docs/> and health at
-<http://localhost:8000/health/>. Stop the stack with `docker compose down`.
+<http://localhost:8000/health/>. The MinIO console is available at <http://localhost:9001/> using
+the development-only `minioadmin` credentials. Stop the stack with `docker compose down`; add `-v`
+only when you intentionally want to remove PostgreSQL, Redis and MinIO data.
 
 Development seed credentials use the password `ServiceFlow123!`:
 
@@ -90,6 +93,9 @@ settings. Secrets and the real `.env` are intentionally excluded from Git.
 | GET | `/api/v1/sla-policies/` | Agent/admin policy lookup |
 | POST, PATCH | `/api/v1/sla-policies/` | Admin policy management |
 | GET | `/api/v1/metrics/` | Operator ticket and SLA metrics |
+| GET, POST | `/api/v1/tickets/{public_id}/attachments/` | List or upload attachments |
+| GET | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/download/` | Signed download URL |
+| DELETE | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/` | Delete an attachment |
 
 Ticket listing supports `status`, `priority`, category slug, assignee and requester filters;
 `search` over title/description; controlled `ordering`; and page-number pagination (20 by default,
@@ -178,6 +184,58 @@ Ticket details expose frozen deadlines, completion/breach timestamps and readabl
 `met`, `breached` or `not_applicable` statuses. Operators can use `?sla_status=breached` or
 `?overdue=true`; `/api/v1/metrics/` returns status counts, breach counts and database-calculated
 average response/resolution durations.
+
+## Attachments and object storage
+
+Attachment metadata lives in PostgreSQL; binary content lives in private S3-compatible object
+storage. Ticket services depend on a small storage adapter rather than MinIO or AWS directly.
+MinIO is the local provider, while production can point the same environment variables at AWS S3
+or another compatible service. There is intentionally no automatic filesystem fallback: storage
+outages fail clearly with a sanitized `503` response.
+
+```text
+multipart upload
+      |
+      v
+validate name + extension + MIME + size
+      |
+      v
+stream SHA-256 -> upload UUID key to object storage
+      |
+      v
+lock and revalidate ticket -> metadata + audit transaction
+      |
+      +-- database/state failure -> compensating object deletion
+```
+
+Upload permits PDF, PNG, JPEG, TXT, CSV, DOCX and XLSX files up to 10 MiB by default. Extension and
+declared MIME must match the allowlist. Empty, extensionless, executable, HTML, SVG, oversized and
+header-injection filenames are rejected. Original names are normalized as metadata only; object
+keys use ticket and attachment UUIDs, so traversal and duplicate filenames cannot collide.
+
+Requesters can access attachments only through their own ticket. They may delete only files they
+uploaded; agents and administrators can delete files on accessible tickets. Closed and cancelled
+tickets remain readable but reject upload and deletion. Downloads are explicit, authorized API
+operations returning a five-minute presigned URL with the original filename in
+`Content-Disposition`; lists never generate signed URLs or expose bucket keys.
+
+Deletion commits metadata removal and audit history first, then deletes the object after commit.
+If that final operation fails, the orphan is logged for future cleanup rather than restoring stale
+metadata. Upload uses the inverse compensation: an object is deleted if metadata persistence or
+the terminal-state recheck fails. This avoids pretending PostgreSQL and S3 share a distributed
+transaction.
+
+Current limitations:
+
+- no malware scanning;
+- no direct-to-S3 browser upload;
+- no asynchronous media processing or orphan cleanup task.
+
+Relevant storage settings are documented in `.env.example`. Check local infrastructure with:
+
+```bash
+docker compose logs minio minio-init
+```
 
 ## Quality checks
 
