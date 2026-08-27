@@ -169,6 +169,28 @@ class TicketComment(models.Model):
         return f"Comment by {self.author} on {self.ticket.public_id}"
 
 
+class TicketAttachment(models.Model):
+    public_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name="attachments")
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="ticket_attachments",
+    )
+    original_name = models.CharField(max_length=255)
+    storage_key = models.CharField(max_length=255, unique=True)
+    content_type = models.CharField(max_length=150)
+    size_bytes = models.PositiveBigIntegerField()
+    sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+
+    def __str__(self):
+        return f"{self.original_name} on {self.ticket.public_id}"
+
+
 class TicketHistory(models.Model):
     class Action(models.TextChoices):
         CREATED = "created", "Created"
@@ -188,6 +210,8 @@ class TicketHistory(models.Model):
             "SLA first response breached",
         )
         SLA_RESOLUTION_BREACHED = "sla_resolution_breached", "SLA resolution breached"
+        ATTACHMENT_UPLOADED = "attachment_uploaded", "Attachment uploaded"
+        ATTACHMENT_DELETED = "attachment_deleted", "Attachment deleted"
 
     ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE, related_name="history")
     actor = models.ForeignKey(

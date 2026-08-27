@@ -27,3 +27,22 @@ class TicketPermissionDenied(TicketDomainError):
 class SLAPolicyNotConfigured(TicketDomainError):
     code = "sla_policy_not_configured"
     status_code = status.HTTP_409_CONFLICT
+
+
+class InvalidAttachment(TicketDomainError):
+    code = "invalid_attachment"
+
+
+class AttachmentNotAllowed(TicketDomainError):
+    code = "attachment_not_allowed"
+    status_code = status.HTTP_409_CONFLICT
+
+
+class AttachmentPermissionDenied(TicketDomainError):
+    code = "attachment_permission_denied"
+    status_code = status.HTTP_403_FORBIDDEN
+
+
+class AttachmentStorageError(TicketDomainError):
+    code = "attachment_storage_unavailable"
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
