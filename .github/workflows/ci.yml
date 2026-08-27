@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: serviceflow_test
+          POSTGRES_USER: serviceflow
+          POSTGRES_PASSWORD: serviceflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U serviceflow -d serviceflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+      DJANGO_SECRET_KEY: ci-only-secret
+      DATABASE_URL: postgresql://serviceflow:serviceflow@localhost:5432/serviceflow_test
+      CELERY_TASK_ALWAYS_EAGER: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: python manage.py check
+      - run: python manage.py migrate --noinput
+      - run: python manage.py makemigrations --check --dry-run
+      - run: pytest --cov --cov-report=term-missing
