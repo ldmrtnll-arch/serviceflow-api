@@ -1,0 +1,41 @@
+from django.contrib import admin
+
+from .models import Ticket, TicketCategory, TicketComment, TicketHistory
+
+
+@admin.register(TicketCategory)
+class TicketCategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "is_active", "created_at")
+    list_filter = ("is_active",)
+    search_fields = ("name", "description")
+    prepopulated_fields = {"slug": ("name",)}
+
+
+@admin.register(Ticket)
+class TicketAdmin(admin.ModelAdmin):
+    list_display = ("public_id", "title", "status", "priority", "requester", "assignee")
+    list_filter = ("status", "priority", "category")
+    search_fields = ("public_id", "title", "description", "requester__email")
+    readonly_fields = ("public_id", "created_at", "updated_at", "resolved_at", "closed_at")
+    list_select_related = ("requester", "assignee", "category")
+
+
+@admin.register(TicketComment)
+class TicketCommentAdmin(admin.ModelAdmin):
+    list_display = ("ticket", "author", "created_at")
+    search_fields = ("content", "author__email", "ticket__title")
+    list_select_related = ("ticket", "author")
+
+
+@admin.register(TicketHistory)
+class TicketHistoryAdmin(admin.ModelAdmin):
+    list_display = ("ticket", "action", "field", "actor", "created_at")
+    list_filter = ("action", "field")
+    search_fields = ("ticket__title", "actor__email")
+    readonly_fields = ("ticket", "actor", "action", "field", "old_value", "new_value", "created_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
