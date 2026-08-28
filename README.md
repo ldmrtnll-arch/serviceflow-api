@@ -1,245 +1,426 @@
 # ServiceFlow API
 
-ServiceFlow is a portfolio-ready REST API for managing support tickets. It demonstrates more
-than CRUD: role-based object access, explicit workflow and SLA rules, transactional audit history,
-concurrency-safe ownership, JWT authentication, asynchronous notifications, and documented APIs.
+[![CI](https://github.com/ldmrtnll-arch/serviceflow-api/actions/workflows/ci.yml/badge.svg)](https://github.com/ldmrtnll-arch/serviceflow-api/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![Django 5](https://img.shields.io/badge/Django-5-092E20?logo=django&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Stack
+A production-oriented REST API for ticket management and support workflows, built with Django
+and Django REST Framework.
 
-- Python 3.12, Django 5, Django REST Framework
-- PostgreSQL, Redis, Celery, MinIO/S3-compatible object storage
-- SimpleJWT, django-filter, drf-spectacular
-- pytest, coverage, Ruff
-- Docker Compose and GitHub Actions
+ServiceFlow API goes beyond CRUD: it combines an explicit ticket state machine, object-level
+authorization, persisted SLA commitments, transactional audit history, asynchronous processing,
+private S3-compatible attachments, request correlation, API hardening, and measured performance.
+The repository is Docker-first and includes reproducible seeds, tests, API documentation, and
+load tooling.
+
+## Features
+
+### Authentication and authorization
+
+- Email-based JWT authentication with access and refresh tokens.
+- `requester`, `agent`, and `admin` roles.
+- Requester isolation enforced by the base ticket queryset.
+- Domain-level permission checks for assignment and state transitions.
+
+### Ticket workflow
+
+- Explicit status transitions instead of unrestricted status updates.
+- Concurrency-safe assignment and take-ownership operations.
+- Comments, immutable audit history, filtering, search, ordering, and pagination.
+- Public UUID identifiers for tickets and attachments.
+
+### SLA management
+
+- Persisted first-response and resolution policies per priority.
+- Deadlines frozen when a ticket is created and intentionally recalculated on priority changes.
+- Idempotent breach detection executed periodically by Celery Beat.
+- SLA status filters and operational metrics.
+
+### Attachments
+
+- Multipart upload with filename, extension, MIME, and size validation.
+- Streaming SHA-256 calculation and collision-resistant UUID object keys.
+- Private MinIO/S3-compatible storage with temporary signed downloads.
+- Compensating cleanup when PostgreSQL and object-storage operations cannot commit atomically.
+
+### Reliability and operations
+
+- PostgreSQL transactions and row locks for state-changing operations.
+- Redis-backed Celery, cache, and throttling.
+- Structured JSON logs, `X-Request-ID`, slow-request events, and HTTP-to-Celery correlation.
+- Liveness/readiness endpoints, sanitized errors, bounded retries, and hardened containers.
+- Query-budget regression tests, PostgreSQL plan review, and a Locust workload.
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | Python 3.12, Django 5, Django REST Framework |
+| Database | PostgreSQL 16 |
+| Async and cache | Celery, Celery Beat, Redis |
+| Object storage | MinIO locally; S3-compatible adapter |
+| Authentication | SimpleJWT / JWT |
+| API documentation | drf-spectacular, OpenAPI, Swagger UI |
+| Testing | pytest, pytest-django, coverage |
+| Quality and security | Ruff, pip-audit, Django deployment checks |
+| Containers and CI | Docker Compose, Gunicorn, GitHub Actions |
+| Load testing | Locust |
 
 ## Architecture
 
+ServiceFlow API is a modular Django monolith. The domain fits coherently in one deployable process,
+while `accounts`, `tickets`, configuration, and infrastructure concerns remain separated. This
+keeps local and production operations understandable without preventing future extraction of a
+module if scale or ownership boundaries justify it.
+
+```mermaid
+flowchart LR
+    Client[API client] --> API[Django REST API / Gunicorn]
+    API --> DB[(PostgreSQL)]
+    API --> Redis[(Redis cache and broker)]
+    API --> Storage[(Private MinIO / S3)]
+    Beat[Celery Beat] --> Redis
+    Redis --> Worker[Celery worker]
+    Worker --> DB
+```
+
+State-changing requests follow an explicit service-layer path:
+
+```mermaid
+flowchart TD
+    Request[HTTP request] --> Correlation[Request ID middleware]
+    Correlation --> Auth[JWT authentication]
+    Auth --> Throttle[Redis-backed throttling]
+    Throttle --> Permission[Role and object authorization]
+    Permission --> Serializer[Input validation]
+    Serializer --> Service[Domain service]
+    Service --> Transaction[transaction.atomic / row lock]
+    Transaction --> Database[(PostgreSQL + audit history)]
+    Database --> Commit[transaction.on_commit]
+    Commit --> Queue[Celery via Redis]
+```
+
+See [Architecture](docs/architecture.md) for the domain model, request lifecycle, consistency
+boundaries, and engineering decisions.
+
+## Project Structure
+
 ```text
 apps/
-├── accounts/      custom email-based user, roles and authentication API
-└── tickets/       models, serializers, filters, permissions, services and Celery tasks
-config/
-├── settings/      shared, local and test settings
-├── celery.py      worker configuration
-├── exceptions.py  consistent domain error responses
-└── urls.py        API, schema, Swagger and health routes
-tests/             domain and API integration tests
+├── accounts/                 custom user, roles, authentication
+└── tickets/                  models, services, SLA, storage, tasks, API
+    └── management/commands/  development and performance seeds
+config/                       settings, URLs, Celery, errors, observability
+tests/                        domain and API integration tests
+loadtests/                    authenticated Locust workload
+docs/                         architecture, demo, and release material
 ```
 
-Business operations live in `apps/tickets/services.py`. Status changes and assignments lock the
-ticket row with `select_for_update()`, update state and audit history in one transaction, then use
-`transaction.on_commit()` to enqueue a notification. This prevents side effects for rolled-back
-transactions and prevents two agents from silently taking the same ticket.
+## Domain Model
 
-## Quick start with Docker
+- **User** — email-based identity with requester, agent, or admin role.
+- **Ticket** — workflow aggregate with requester, optional assignee, priority, status, and SLA data.
+- **TicketCategory** — administrative classification referenced by tickets.
+- **TicketComment** — user-authored conversation entry; the first operator comment completes the
+  first-response SLA.
+- **TicketHistory** — append-only audit entry for important domain changes.
+- **SLAPolicy** — one active first-response/resolution policy per priority.
+- **TicketAttachment** — PostgreSQL metadata for a private object stored outside the database.
 
-```bash
-docker compose up -d --build
-docker compose exec api python manage.py seed_dev
+## Roles and Ticket Workflow
+
+- **requester** — creates tickets, sees only their own tickets, comments, edits safe fields while
+  open, and may cancel an active ticket.
+- **agent** — sees operational tickets, takes ownership, comments, updates safe fields, and performs
+  allowed transitions.
+- **admin** — has operational access, can reassign tickets, and manages categories and SLA policies.
+
+```mermaid
+stateDiagram-v2
+    [*] --> OPEN
+    OPEN --> IN_PROGRESS: assignee required
+    OPEN --> CANCELLED
+    IN_PROGRESS --> WAITING_REQUESTER
+    IN_PROGRESS --> RESOLVED
+    IN_PROGRESS --> CANCELLED
+    WAITING_REQUESTER --> IN_PROGRESS
+    WAITING_REQUESTER --> RESOLVED
+    WAITING_REQUESTER --> CANCELLED
+    RESOLVED --> IN_PROGRESS: reopen
+    RESOLVED --> CLOSED
+    CLOSED --> [*]
+    CANCELLED --> [*]
 ```
 
-The Compose stack runs PostgreSQL, Redis, private MinIO object storage, the Gunicorn API, a Celery
-worker and one Celery Beat instance. The `minio-init` container idempotently creates the private
-`serviceflow-attachments` bucket. Beat is intentionally single-instance in development; row
-locking and idempotent breach writes still protect against overlapping task executions.
-
-Open Swagger at <http://localhost:8000/api/docs/> and health at
-<http://localhost:8000/health/>. The MinIO console is available at <http://localhost:9001/> using
-the development-only `minioadmin` credentials. Stop the stack with `docker compose down`; add `-v`
-only when you intentionally want to remove PostgreSQL, Redis and MinIO data.
-
-Development seed credentials use the password `ServiceFlow123!`:
-
-- `admin@serviceflow.local`
-- `agent@serviceflow.local`
-- `requester@serviceflow.local`
-
-These accounts are local examples only. `seed_dev` is idempotent.
-
-## Local setup without Docker
-
-SQLite is the zero-configuration fallback. PostgreSQL is used when `DATABASE_URL` is present.
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install ".[dev]"
-python manage.py migrate
-python manage.py seed_dev
-python manage.py runserver
-```
-
-Copy `.env.example` values into your environment when using PostgreSQL, Redis, or production-like
-settings. Secrets and the real `.env` are intentionally excluded from Git.
-
-## API
-
-| Method | Endpoint | Purpose |
-|---|---|---|
-| POST | `/api/v1/auth/register/` | Public requester registration |
-| POST | `/api/v1/auth/login/` | Obtain access and refresh JWTs |
-| POST | `/api/v1/auth/token/refresh/` | Refresh an access token |
-| GET | `/api/v1/auth/me/` | Current user profile |
-| GET, POST | `/api/v1/tickets/` | List accessible tickets or create one |
-| GET, PATCH | `/api/v1/tickets/{public_id}/` | Retrieve or edit safe fields |
-| POST | `/api/v1/tickets/{public_id}/take/` | Agent takes ownership |
-| POST | `/api/v1/tickets/{public_id}/assign/` | Assign or unassign an operator |
-| POST | `/api/v1/tickets/{public_id}/transition/` | Explicit workflow transition |
-| GET, POST | `/api/v1/tickets/{public_id}/comments/` | Scoped comments |
-| GET | `/api/v1/tickets/{public_id}/history/` | Read-only audit trail |
-| GET | `/api/v1/categories/` | Active and inactive categories |
-| POST, PATCH | `/api/v1/categories/` | Admin category management |
-| GET | `/api/v1/sla-policies/` | Agent/admin policy lookup |
-| POST, PATCH | `/api/v1/sla-policies/` | Admin policy management |
-| GET | `/api/v1/metrics/` | Operator ticket and SLA metrics |
-| GET, POST | `/api/v1/tickets/{public_id}/attachments/` | List or upload attachments |
-| GET | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/download/` | Signed download URL |
-| DELETE | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/` | Delete an attachment |
-| GET | `/health/` | Process liveness |
-| GET | `/health/ready/` | Database readiness and Redis degradation |
-
-Ticket listing supports `status`, `priority`, category slug, assignee and requester filters;
-`search` over title/description; controlled `ordering`; and page-number pagination (20 by default,
-100 maximum). Requester filtering never bypasses the base object-access queryset.
-
-## Roles and workflow
-
-- Requesters create and see only their own tickets, comment on them, edit safe fields while open,
-  and may cancel their own active ticket.
-- Agents see operational tickets, take ownership, update safe fields and execute transitions.
-- Admins have broad operational access and can reassign tickets or manage categories.
-- Public registration always creates a requester, regardless of extra client fields.
-- Assignees must be agents or admins. Server-controlled state cannot be mass-assigned.
-
-```text
-OPEN
-├── IN_PROGRESS (requires assignee)
-└── CANCELLED
-
-IN_PROGRESS
-├── WAITING_REQUESTER
-├── RESOLVED
-└── CANCELLED
-
-WAITING_REQUESTER
-├── IN_PROGRESS
-├── RESOLVED
-└── CANCELLED
-
-RESOLVED
-├── IN_PROGRESS (reopens and clears resolved_at)
-└── CLOSED
-```
-
-Closed and cancelled tickets are terminal. Resolution and closure timestamps are server-owned.
-Every important state, priority, category, assignment, and field change receives an audit entry.
+Closed and cancelled tickets are terminal. Workflow fields and timestamps are server-controlled;
+clients use explicit actions rather than assigning arbitrary state.
 
 ## SLA Management
 
-SLA uses elapsed calendar time. Business hours, holidays and regional calendars are intentionally
-outside this phase. One active persisted policy defines first-response and resolution targets for
-each priority:
+The development seed creates these elapsed-time policies:
 
 | Priority | First response | Resolution |
 |---|---:|---:|
-| Low | 24 hours | 120 hours |
-| Medium | 8 hours | 72 hours |
-| High | 4 hours | 24 hours |
-| Urgent | 1 hour | 8 hours |
+| Low | 24 h | 120 h |
+| Medium | 8 h | 72 h |
+| High | 4 h | 24 h |
+| Urgent | 1 h | 8 h |
 
-Creating a ticket requires an active policy. Its deadlines are calculated from `created_at` and
-stored on the ticket, so later policy edits never silently rewrite historical commitments. An
-explicit priority change is different: it intentionally recalculates both deadlines from the
-original creation timestamp using the newly applicable policy. If that makes the ticket overdue,
-the breach is recorded in the same transaction.
+Ticket creation resolves the active policy and persists both deadlines. Later policy edits do not
+rewrite existing commitments; an explicit priority change recalculates deadlines from the original
+creation time. The first agent/admin comment records `first_responded_at`, and
+`first_resolved_at` permanently captures the first resolution even when a ticket is reopened.
 
-The first agent or administrator comment completes First Response SLA; requester comments do not.
-`first_resolved_at` records the first resolution permanently for Resolution SLA, while
-`resolved_at` still describes the current state and is cleared on reopening. Completion at or
-before the deadline is met; later completion is breached. Cancellation stops future checks but
-preserves breaches already recorded.
+Celery Beat selects overdue candidates every minute. Each candidate is locked and rechecked before
+writing its breach timestamp, history, and post-commit notification, so repeated or overlapping
+runs do not duplicate the breach.
 
-```text
-Ticket created
-      │
-      ▼
-Resolve active policy → calculate and persist deadlines
-      │
-      ▼
-Celery Beat checks overdue candidates every minute
-      │
-      ├── no breach → no write
-      └── breach → row lock → timestamp + history → commit → notification task
+## Attachments
+
+PostgreSQL stores attachment metadata and audit records; MinIO/S3 stores binary content in a
+private bucket. API responses never expose object keys, and lists do not generate signed URLs.
+Authorized download actions return five-minute presigned URLs.
+
+Uploads accept PDF, PNG, JPEG, TXT, CSV, DOCX, and XLSX up to 10 MiB by default. UUID keys prevent
+path traversal and filename collisions. If object upload succeeds but database persistence fails,
+the object is deleted as compensation. Deletion commits metadata first and performs object cleanup
+after commit; failures are logged for later orphan handling.
+
+## Observability
+
+Every response includes `X-Request-ID`. Valid client identifiers are accepted; invalid or oversized
+values are replaced by UUIDs. A `ContextVar` keeps concurrent request/task context isolated, and
+Celery headers propagate the identifier from HTTP publication to worker execution.
+
+Logs are JSON, timestamped in UTC, and include relevant HTTP or task fields without request bodies,
+tokens, cookies, or storage credentials. Requests above the configurable threshold emit
+`slow_http_request`.
+
+```json
+{
+  "timestamp": "2026-08-28T10:42:38.161100+00:00",
+  "level": "INFO",
+  "logger": "serviceflow.tasks",
+  "event": "celery_task_started",
+  "request_id": "demo-request-001",
+  "task_name": "apps.tickets.tasks.notify_ticket_event",
+  "task_id": "00000000-0000-0000-0000-000000000000"
+}
 ```
 
-Candidate selection happens in the database. Each update rechecks a locked row and only writes an
-empty breach timestamp, making repeated or concurrent checks idempotent: timestamps, history and
-notifications are not duplicated. The interval is controlled by `CELERY_BEAT_SCHEDULE` in Django
-settings. Inspect processing with:
+## Reliability and Resilience
+
+- `transaction.atomic()` keeps domain state and audit records together.
+- `select_for_update()` prevents assignment and transition races.
+- `transaction.on_commit()` prevents async publication for rolled-back changes.
+- Broker publication failures are logged without invalidating committed API operations.
+- Celery retries transient database failures with bounded backoff.
+- S3 calls use bounded adaptive retries and connection/read timeouts.
+- Attachment compensation handles the PostgreSQL/S3 consistency boundary explicitly.
+- `/health/ready/` treats PostgreSQL as essential and Redis as degradable.
+
+## Security
+
+Implemented controls include JWT authentication, role and object authorization, requester data
+isolation, Redis-backed throttling, file allowlists, a private object bucket, expiring signed URLs,
+sanitized production errors, secure production-setting defaults, non-root containers, and
+dependency auditing. These are concrete controls, not a claim that any deployment is automatically
+secure; proxy trust, secret management, TLS, monitoring, and infrastructure policies remain
+deployment responsibilities.
+
+## Performance
+
+Measurements below were collected locally during the hardening phase and are not production
+benchmarks.
+
+### Query efficiency
+
+- Ticket page: **2 SQL queries for 20 tickets**.
+- Regression budget: **no more than 4 queries with 30 tickets**.
+- Related users/categories are joined and attachment counts are annotated to prevent N+1 queries.
+
+### PostgreSQL query plans
+
+| Query | Local execution time |
+|---|---:|
+| Status + newest tickets | 0.054 ms |
+| Priority + newest tickets | 0.039 ms |
+| SLA candidates | 0.106 ms |
+
+### Load test
+
+| Metric | Result |
+|---|---:|
+| Users | 10 |
+| Duration | 30 s |
+| Requests | 285 |
+| Failures | 0 |
+| Requests/s | 9.68 |
+| p50 | 13 ms |
+| p95 | 26 ms |
+| p99 | 150 ms |
+
+These results represent a local development environment and are not production benchmarks.
+
+## Getting Started
+
+### Requirements
+
+- Git
+- Docker with Docker Compose v2
+
+### 1. Clone
 
 ```bash
-docker compose logs -f worker beat
+git clone https://github.com/ldmrtnll-arch/serviceflow-api.git
+cd serviceflow-api
 ```
 
-Ticket details expose frozen deadlines, completion/breach timestamps and readable `pending`,
-`met`, `breached` or `not_applicable` statuses. Operators can use `?sla_status=breached` or
-`?overdue=true`; `/api/v1/metrics/` returns status counts, breach counts and database-calculated
-average response/resolution durations.
+### 2. Optional environment file
 
-## Attachments and object storage
+The Compose defaults work without a local `.env`. Copy the example when you want a documented
+starting point for customization.
 
-Attachment metadata lives in PostgreSQL; binary content lives in private S3-compatible object
-storage. Ticket services depend on a small storage adapter rather than MinIO or AWS directly.
-MinIO is the local provider, while production can point the same environment variables at AWS S3
-or another compatible service. There is intentionally no automatic filesystem fallback: storage
-outages fail clearly with a sanitized `503` response.
-
-```text
-multipart upload
-      |
-      v
-validate name + extension + MIME + size
-      |
-      v
-stream SHA-256 -> upload UUID key to object storage
-      |
-      v
-lock and revalidate ticket -> metadata + audit transaction
-      |
-      +-- database/state failure -> compensating object deletion
-```
-
-Upload permits PDF, PNG, JPEG, TXT, CSV, DOCX and XLSX files up to 10 MiB by default. Extension and
-declared MIME must match the allowlist. Empty, extensionless, executable, HTML, SVG, oversized and
-header-injection filenames are rejected. Original names are normalized as metadata only; object
-keys use ticket and attachment UUIDs, so traversal and duplicate filenames cannot collide.
-
-Requesters can access attachments only through their own ticket. They may delete only files they
-uploaded; agents and administrators can delete files on accessible tickets. Closed and cancelled
-tickets remain readable but reject upload and deletion. Downloads are explicit, authorized API
-operations returning a five-minute presigned URL with the original filename in
-`Content-Disposition`; lists never generate signed URLs or expose bucket keys.
-
-Deletion commits metadata removal and audit history first, then deletes the object after commit.
-If that final operation fails, the orphan is logged for future cleanup rather than restoring stale
-metadata. Upload uses the inverse compensation: an object is deleted if metadata persistence or
-the terminal-state recheck fails. This avoids pretending PostgreSQL and S3 share a distributed
-transaction.
-
-Current limitations:
-
-- no malware scanning;
-- no direct-to-S3 browser upload;
-- no asynchronous media processing or orphan cleanup task.
-
-Relevant storage settings are documented in `.env.example`. Check local infrastructure with:
+Linux/macOS:
 
 ```bash
-docker compose logs minio minio-init
+cp .env.example .env
 ```
 
-## Quality checks
+PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+All example secrets and credentials are development-only.
+
+### 3. Start the stack
+
+```bash
+docker compose up -d --build
+```
+
+The API container automatically applies migrations before Gunicorn starts. To run them explicitly:
+
+```bash
+docker compose exec api python manage.py migrate
+```
+
+### 4. Seed development data
+
+```bash
+docker compose exec api python manage.py seed_dev
+```
+
+`seed_dev` is idempotent. It creates these **development-only** accounts with password
+`ServiceFlow123!`:
+
+- `requester@serviceflow.local`
+- `agent@serviceflow.local`
+- `admin@serviceflow.local`
+
+### 5. Open Swagger
+
+Swagger UI is the fastest way to explore the authenticated workflow:
+<http://localhost:8000/api/docs/>.
+
+## Local Services
+
+| Service | URL / purpose |
+|---|---|
+| API | <http://localhost:8000> |
+| Swagger UI | <http://localhost:8000/api/docs/> |
+| OpenAPI schema | <http://localhost:8000/api/schema/> |
+| Liveness | <http://localhost:8000/health/> |
+| Readiness | <http://localhost:8000/health/ready/> |
+| MinIO console | <http://localhost:9001> |
+
+| Compose service | Purpose |
+|---|---|
+| `api` | Django/Gunicorn API and automatic migrations |
+| `db` | PostgreSQL relational database |
+| `redis` | Celery broker/backend, cache, and throttling |
+| `worker` | Asynchronous notification and SLA processing |
+| `beat` | Periodic SLA scheduling |
+| `minio` | Private local object storage |
+| `minio-init` | Idempotent bucket initialization |
+
+## API Quick Start
+
+Login and copy the returned access token:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/login/ \
+  -H "Content-Type: application/json" \
+  -d '{"email":"requester@serviceflow.local","password":"ServiceFlow123!"}'
+```
+
+Set `TOKEN` and use a category ID returned by `GET /api/v1/categories/`:
+
+```bash
+TOKEN="<access-token>"
+CATEGORY_ID="<category-id>"
+
+curl -X POST http://localhost:8000/api/v1/tickets/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"title\":\"VPN access\",\"description\":\"Unable to connect\",\"priority\":\"high\",\"category\":$CATEGORY_ID}"
+
+curl http://localhost:8000/api/v1/tickets/ \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Upload an allowed attachment to an accessible, non-terminal ticket:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/tickets/<ticket-uuid>/attachments/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@evidence.pdf;type=application/pdf"
+```
+
+For a complete interview-sized walkthrough, see [Demo Guide](docs/demo.md). A ready-to-edit VS Code
+REST Client collection is available at [serviceflow.http](docs/serviceflow.http).
+
+## API Overview
+
+| Area | Endpoints |
+|---|---|
+| Authentication | `POST /api/v1/auth/register/`, `login/`, `token/refresh/`; `GET me/` |
+| Tickets | list/create/detail/update plus `take`, `assign`, `transition`, `comments`, `history` |
+| Attachments | list/upload, authorized signed download, delete |
+| Categories | authenticated read; admin create/update |
+| SLA | operator read; admin create/update; ticket SLA filters |
+| Metrics | `GET /api/v1/metrics/` for operators |
+| Health | `GET /health/` and `GET /health/ready/` |
+
+Ticket lists support status, priority, category, assignee, requester, SLA, and overdue filters;
+title/description search; controlled ordering; and page-number pagination.
+
+## Testing
+
+Current validated state:
+
+```text
+116 passed
+0 failed
+coverage: 93.42%
+```
+
+The suite covers authentication, permissions, requester isolation/IDOR, workflow transitions,
+concurrency-sensitive services, SLA timing and idempotency, attachments, failure compensation,
+throttling, request correlation, readiness behavior, and query budgets.
+
+```bash
+pytest
+pytest --cov --cov-report=term-missing --cov-fail-under=90
+```
+
+The runtime image intentionally excludes test dependencies. For containerized tests, build or run
+a development environment with `.[dev]`; the CI workflow is the reference PostgreSQL test path.
+
+## Quality Checks
 
 ```bash
 ruff check .
@@ -248,78 +429,55 @@ python manage.py check
 python manage.py makemigrations --check --dry-run
 python manage.py spectacular --file openapi.yml --validate
 pytest --cov --cov-report=term-missing --cov-fail-under=90
-pip-audit
-docker compose config
+pip-audit .
+python manage.py check --deploy
+docker compose config --quiet
 ```
 
-The CI workflow runs the same checks against a PostgreSQL 16 service on pushes and pull requests
-to `main`.
+CI runs lint, format, Django checks, clean migrations, OpenAPI validation, the 90% coverage gate,
+dependency auditing, and production deployment checks against PostgreSQL 16.
 
-## Observability and operational resilience
+## Performance Tooling
 
-Every response contains `X-Request-ID`. A client ID is reused only when it contains a conservative
-set of characters and is at most 128 characters; otherwise the API generates a UUID. The same ID
-is stored in request-local context, added to structured JSON logs and propagated in Celery task
-headers. Periodic tasks generate an independent ID. HTTP completion logs include method, path,
-status, monotonic duration and authenticated user ID. Requests above
-`SLOW_REQUEST_THRESHOLD_MS` emit `slow_http_request`. Bodies, JWTs, cookies and credentials are
-never logged.
-
-`/health/` is liveness and deliberately has no dependency checks. `/health/ready/` checks
-PostgreSQL as essential: a database outage returns `503 unavailable`. Redis is optional for
-serving traffic, so its outage returns `200 degraded`. MinIO and Celery are excluded because
-synchronous endpoints that do not use them can remain available.
-
-Notification publication still runs after database commit. If Redis/the broker is unavailable,
-the committed API operation succeeds and the failure is logged. Worker database failures use
-bounded exponential retry; S3 calls use short connection/read timeouts and bounded adaptive
-retries. This is not guaranteed delivery: a transactional outbox is the recommended next step
-when notification loss is unacceptable.
-
-## API hardening
-
-Redis-backed DRF limits are 1000 requests/hour per authenticated user, 100/hour per anonymous IP,
-10/minute per login IP, 5/minute per registration IP and 30/hour per upload user. Throttling is
-explicitly fail-open during Redis outages so the API remains available; monitor degraded
-readiness because that temporarily weakens abuse protection. A rejection returns HTTP 429,
-`Retry-After` and `{"code":"throttled","detail":"..."}`. Validation errors add an `errors`
-object; authentication, authorization, not-found and unexpected errors use the same stable
-`code`/`detail` envelope. Unexpected errors are sanitized when `DEBUG=false`.
-
-Production must use `config.settings.production`. It refuses to start without
-`DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`. TLS redirect, secure cookies, HSTS, trusted CSRF
-origins, persistent database connections and statement timeout are environment-controlled. Set
-`SECURE_PROXY_SSL_HEADER_ENABLED=true` only behind a proxy that removes client-supplied forwarding
-headers and writes `X-Forwarded-Proto` itself. JWT access tokens last 15 minutes and refresh tokens
-seven days; never put them in logs or source control.
-
-## Performance and load testing
-
-Ticket lists use `select_related` plus one attachment count annotation. A regression test keeps a
-20-item page at no more than four SQL queries with 30 tickets. Composite indexes support common
-status/priority filters with newest-first ordering. Validate plans against PostgreSQL with:
+Seed the disposable Docker environment for query and load work:
 
 ```bash
 docker compose exec api python manage.py seed_perf --tickets 1000
-docker compose exec api python manage.py shell -c "from apps.tickets.models import Ticket; print(Ticket.objects.filter(status='open').order_by('-created_at').explain(analyze=True, buffers=True))"
-```
-
-`seed_perf` is non-idempotent, deterministic per run and capped at 5000 tickets; use it only in
-disposable development databases. Run the included authenticated workload with:
-
-```bash
 locust -f loadtests/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 30s
 ```
 
-Override `LOADTEST_EMAIL` and `LOADTEST_PASSWORD` as needed. Record throughput, failure percentage
-and p50/p95/p99 from actual output; this repository does not claim synthetic benchmark numbers.
+`seed_perf` is non-idempotent and capped at 5,000 tickets. Never run it against important data.
 
-## Production checklist
+## Production Configuration
 
-- Use a long random secret, explicit hosts/origins and HTTPS-only cookie/HSTS settings.
-- Configure the trusted reverse proxy and verify request-ID forwarding.
-- Provision PostgreSQL, Redis and private S3 credentials outside source control.
-- Run migrations, deployment checks, OpenAPI validation, coverage and `pip-audit`.
-- Alert on 5xx, slow requests, degraded readiness and task publication failures.
-- Tune Gunicorn from measurements and preserve graceful worker termination.
-- Seed and load-test only disposable environments, then inspect PostgreSQL query plans.
+Use `config.settings.production`. At minimum, provide a long `DJANGO_SECRET_KEY`, explicit
+`DJANGO_ALLOWED_HOSTS`, PostgreSQL `DATABASE_URL`, Redis URLs, and private S3 credentials. Review
+trusted CSRF origins, TLS redirect, secure cookies, HSTS, statement timeout, and proxy behavior.
+Enable `SECURE_PROXY_SSL_HEADER_ENABLED` only when a trusted proxy overwrites forwarded headers.
+See [.env.example](.env.example) for the complete variable reference; its values are local examples,
+not production defaults.
+
+## Current Limitations
+
+- SLA uses elapsed time rather than business-hour calendars or holidays.
+- Attachments are allowlisted but are not scanned for malware.
+- Notification tasks currently produce structured operational logs rather than sending email.
+- There is no team queue, skills-based routing, or frontend.
+- Post-commit publication does not provide transactional-outbox delivery guarantees.
+- MinIO credentials and topology in Compose are strictly for local development.
+
+## Possible Future Improvements
+
+- Team queues and automatic assignment rules.
+- Business-hour SLA calendars.
+- Malware scanning and direct-to-S3 uploads.
+- Transactional outbox with delivery monitoring.
+- External email or webhook notification providers.
+
+## Release and License
+
+- [Changelog](CHANGELOG.md)
+- [v1.0.0 release notes](docs/releases/v1.0.0.md)
+- [MIT License](LICENSE)
+
+The application release is `1.0.0`; `/api/v1/` is the independent HTTP API namespace.
