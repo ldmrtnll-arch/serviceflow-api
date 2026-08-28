@@ -1,0 +1,99 @@
+@baseUrl = http://localhost:8000
+@requestId = portfolio-demo-001
+
+### Liveness
+GET {{baseUrl}}/health/
+X-Request-ID: {{requestId}}
+
+### Readiness
+GET {{baseUrl}}/health/ready/
+
+### Requester login
+# @name requesterLogin
+POST {{baseUrl}}/api/v1/auth/login/
+Content-Type: application/json
+
+{
+  "email": "requester@serviceflow.local",
+  "password": "ServiceFlow123!"
+}
+
+### List categories
+# @name categories
+GET {{baseUrl}}/api/v1/categories/
+Authorization: Bearer {{requesterLogin.response.body.$.access}}
+
+### Create ticket
+# @name createTicket
+POST {{baseUrl}}/api/v1/tickets/
+Authorization: Bearer {{requesterLogin.response.body.$.access}}
+Content-Type: application/json
+X-Request-ID: {{requestId}}
+
+{
+  "title": "VPN access is unavailable",
+  "description": "The client cannot establish a connection.",
+  "priority": "high",
+  "category": {{categories.response.body.$.results[0].id}}
+}
+
+### List requester tickets
+GET {{baseUrl}}/api/v1/tickets/
+Authorization: Bearer {{requesterLogin.response.body.$.access}}
+
+### Agent login
+# @name agentLogin
+POST {{baseUrl}}/api/v1/auth/login/
+Content-Type: application/json
+
+{
+  "email": "agent@serviceflow.local",
+  "password": "ServiceFlow123!"
+}
+
+### Agent takes ownership
+POST {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/take/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+
+### Transition to in progress
+POST {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/transition/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "status": "in_progress"
+}
+
+### First operator response
+POST {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/comments/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "content": "I am investigating the VPN connection."
+}
+
+### Upload an inline text attachment
+POST {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/attachments/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+Content-Type: multipart/form-data; boundary=ServiceFlowBoundary
+
+--ServiceFlowBoundary
+Content-Disposition: form-data; name="file"; filename="evidence.txt"
+Content-Type: text/plain
+
+Reproduction details for the ServiceFlow API demo.
+--ServiceFlowBoundary--
+
+### View audit history
+GET {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/history/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+
+### Resolve ticket
+POST {{baseUrl}}/api/v1/tickets/{{createTicket.response.body.$.id}}/transition/
+Authorization: Bearer {{agentLogin.response.body.$.access}}
+Content-Type: application/json
+
+{
+  "status": "resolved"
+}
