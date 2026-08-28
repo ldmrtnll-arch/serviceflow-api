@@ -38,6 +38,19 @@ def test_s3_adapter_deletes_object(storage_clients):
     internal.delete_object.assert_called_once_with(Bucket="private-bucket", Key="tickets/key")
 
 
+def test_s3_client_construction_uses_resilience_settings(monkeypatch, settings):
+    settings.S3_CONNECT_TIMEOUT_SECONDS = 2
+    settings.S3_READ_TIMEOUT_SECONDS = 7
+    settings.S3_MAX_ATTEMPTS = 4
+    client_factory = Mock(side_effect=[Mock(), Mock()])
+    monkeypatch.setattr("apps.tickets.object_storage.boto3.client", client_factory)
+    S3ObjectStorage()
+    config = client_factory.call_args_list[0].kwargs["config"]
+    assert config.connect_timeout == 2
+    assert config.read_timeout == 7
+    assert config.retries == {"mode": "adaptive", "max_attempts": 4}
+
+
 def test_s3_adapter_presigns_public_url_with_expiration_and_filename(storage_clients):
     storage, _, public = storage_clients
     public.generate_presigned_url.return_value = "http://localhost:9000/signed"
