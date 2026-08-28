@@ -1,10 +1,12 @@
 import os
 from datetime import timedelta
+from importlib.metadata import version
 from pathlib import Path
 
 import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+SERVICEFLOW_VERSION = version("serviceflow-api")
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -125,8 +127,11 @@ SIMPLE_JWT = {
 }
 SPECTACULAR_SETTINGS = {
     "TITLE": "ServiceFlow API",
-    "DESCRIPTION": "Ticket management API with explicit workflow and audit history.",
-    "VERSION": "1.0.0",
+    "DESCRIPTION": (
+        "Production-oriented ticket management API with explicit workflows, SLA tracking, "
+        "private attachments, audit history, and asynchronous processing."
+    ),
+    "VERSION": SERVICEFLOW_VERSION,
     "ENUM_NAME_OVERRIDES": {"TicketStatusEnum": "apps.tickets.models.Ticket.Status"},
 }
 

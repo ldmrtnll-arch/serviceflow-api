@@ -4,9 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "serviceflow-api"
-version = "0.1.0"
-description = "Ticket management and workflow API"
+version = "1.0.0"
+description = "Production-oriented ticket management and support workflow REST API"
 requires-python = ">=3.12"
+license = "MIT"
 dependencies = [
   "boto3>=1.35,<2",
   "celery[redis]>=5.4,<6",
