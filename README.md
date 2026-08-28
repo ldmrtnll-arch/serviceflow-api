@@ -96,6 +96,8 @@ settings. Secrets and the real `.env` are intentionally excluded from Git.
 | GET, POST | `/api/v1/tickets/{public_id}/attachments/` | List or upload attachments |
 | GET | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/download/` | Signed download URL |
 | DELETE | `/api/v1/tickets/{public_id}/attachments/{attachment_id}/` | Delete an attachment |
+| GET | `/health/` | Process liveness |
+| GET | `/health/ready/` | Database readiness and Redis degradation |
 
 Ticket listing supports `status`, `priority`, category slug, assignee and requester filters;
 `search` over title/description; controlled `ordering`; and page-number pagination (20 by default,
@@ -244,10 +246,80 @@ ruff check .
 ruff format --check .
 python manage.py check
 python manage.py makemigrations --check --dry-run
-pytest
-pytest --cov --cov-report=term-missing
+python manage.py spectacular --file openapi.yml --validate
+pytest --cov --cov-report=term-missing --cov-fail-under=90
+pip-audit
 docker compose config
 ```
 
 The CI workflow runs the same checks against a PostgreSQL 16 service on pushes and pull requests
 to `main`.
+
+## Observability and operational resilience
+
+Every response contains `X-Request-ID`. A client ID is reused only when it contains a conservative
+set of characters and is at most 128 characters; otherwise the API generates a UUID. The same ID
+is stored in request-local context, added to structured JSON logs and propagated in Celery task
+headers. Periodic tasks generate an independent ID. HTTP completion logs include method, path,
+status, monotonic duration and authenticated user ID. Requests above
+`SLOW_REQUEST_THRESHOLD_MS` emit `slow_http_request`. Bodies, JWTs, cookies and credentials are
+never logged.
+
+`/health/` is liveness and deliberately has no dependency checks. `/health/ready/` checks
+PostgreSQL as essential: a database outage returns `503 unavailable`. Redis is optional for
+serving traffic, so its outage returns `200 degraded`. MinIO and Celery are excluded because
+synchronous endpoints that do not use them can remain available.
+
+Notification publication still runs after database commit. If Redis/the broker is unavailable,
+the committed API operation succeeds and the failure is logged. Worker database failures use
+bounded exponential retry; S3 calls use short connection/read timeouts and bounded adaptive
+retries. This is not guaranteed delivery: a transactional outbox is the recommended next step
+when notification loss is unacceptable.
+
+## API hardening
+
+Redis-backed DRF limits are 1000 requests/hour per authenticated user, 100/hour per anonymous IP,
+10/minute per login IP, 5/minute per registration IP and 30/hour per upload user. Throttling is
+explicitly fail-open during Redis outages so the API remains available; monitor degraded
+readiness because that temporarily weakens abuse protection. A rejection returns HTTP 429,
+`Retry-After` and `{"code":"throttled","detail":"..."}`. Validation errors add an `errors`
+object; authentication, authorization, not-found and unexpected errors use the same stable
+`code`/`detail` envelope. Unexpected errors are sanitized when `DEBUG=false`.
+
+Production must use `config.settings.production`. It refuses to start without
+`DJANGO_SECRET_KEY` and `DJANGO_ALLOWED_HOSTS`. TLS redirect, secure cookies, HSTS, trusted CSRF
+origins, persistent database connections and statement timeout are environment-controlled. Set
+`SECURE_PROXY_SSL_HEADER_ENABLED=true` only behind a proxy that removes client-supplied forwarding
+headers and writes `X-Forwarded-Proto` itself. JWT access tokens last 15 minutes and refresh tokens
+seven days; never put them in logs or source control.
+
+## Performance and load testing
+
+Ticket lists use `select_related` plus one attachment count annotation. A regression test keeps a
+20-item page at no more than four SQL queries with 30 tickets. Composite indexes support common
+status/priority filters with newest-first ordering. Validate plans against PostgreSQL with:
+
+```bash
+docker compose exec api python manage.py seed_perf --tickets 1000
+docker compose exec api python manage.py shell -c "from apps.tickets.models import Ticket; print(Ticket.objects.filter(status='open').order_by('-created_at').explain(analyze=True, buffers=True))"
+```
+
+`seed_perf` is non-idempotent, deterministic per run and capped at 5000 tickets; use it only in
+disposable development databases. Run the included authenticated workload with:
+
+```bash
+locust -f loadtests/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 30s
+```
+
+Override `LOADTEST_EMAIL` and `LOADTEST_PASSWORD` as needed. Record throughput, failure percentage
+and p50/p95/p99 from actual output; this repository does not claim synthetic benchmark numbers.
+
+## Production checklist
+
+- Use a long random secret, explicit hosts/origins and HTTPS-only cookie/HSTS settings.
+- Configure the trusted reverse proxy and verify request-ID forwarding.
+- Provision PostgreSQL, Redis and private S3 credentials outside source control.
+- Run migrations, deployment checks, OpenAPI validation, coverage and `pip-audit`.
+- Alert on 5xx, slow requests, degraded readiness and task publication failures.
+- Tune Gunicorn from measurements and preserve graceful worker termination.
+- Seed and load-test only disposable environments, then inspect PostgreSQL query plans.
