@@ -120,13 +120,21 @@ class TicketViewSet(
         ticket = update_ticket(ticket=ticket, actor=request.user, data=serializer.validated_data)
         return Response(TicketDetailSerializer(ticket).data)
 
-    @extend_schema(request=None, responses=TicketDetailSerializer)
+    @extend_schema(
+        request=None,
+        responses=TicketDetailSerializer,
+        description="Assign the authenticated agent to an unassigned active ticket.",
+    )
     @action(detail=True, methods=["post"])
     def take(self, request, **kwargs):
         ticket = take_ownership(ticket=self.get_object(), actor=request.user)
         return Response(TicketDetailSerializer(ticket).data)
 
-    @extend_schema(request=TicketAssignmentSerializer, responses=TicketDetailSerializer)
+    @extend_schema(
+        request=TicketAssignmentSerializer,
+        responses=TicketDetailSerializer,
+        description="Assign or reassign an active ticket to an agent.",
+    )
     @action(detail=True, methods=["post"])
     def assign(self, request, **kwargs):
         serializer = TicketAssignmentSerializer(data=request.data)
@@ -136,7 +144,11 @@ class TicketViewSet(
         )
         return Response(TicketDetailSerializer(ticket).data)
 
-    @extend_schema(request=TicketTransitionSerializer, responses=TicketDetailSerializer)
+    @extend_schema(
+        request=TicketTransitionSerializer,
+        responses=TicketDetailSerializer,
+        description="Apply an allowed workflow transition to a ticket.",
+    )
     @action(detail=True, methods=["post"])
     def transition(self, request, **kwargs):
         serializer = TicketTransitionSerializer(data=request.data)
@@ -148,7 +160,18 @@ class TicketViewSet(
         )
         return Response(TicketDetailSerializer(ticket).data)
 
-    @extend_schema(responses=TicketCommentSerializer(many=True))
+    @extend_schema(
+        methods=["GET"],
+        request=None,
+        responses=TicketCommentSerializer(many=True),
+        description="List the ticket conversation in chronological order.",
+    )
+    @extend_schema(
+        methods=["POST"],
+        request=TicketCommentSerializer,
+        responses={status.HTTP_201_CREATED: TicketCommentSerializer},
+        description="Add a comment to an active ticket.",
+    )
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, **kwargs):
         ticket = self.get_object()
@@ -164,7 +187,11 @@ class TicketViewSet(
         serializer = TicketCommentSerializer(page, many=True)
         return self.get_paginated_response(serializer.data)
 
-    @extend_schema(responses=TicketHistorySerializer(many=True))
+    @extend_schema(
+        request=None,
+        responses=TicketHistorySerializer(many=True),
+        description="List append-only audit entries for the ticket.",
+    )
     @action(detail=True, methods=["get"])
     def history(self, request, **kwargs):
         entries = self.get_object().history.select_related("actor")
@@ -173,8 +200,16 @@ class TicketViewSet(
         return self.get_paginated_response(serializer.data)
 
     @extend_schema(
-        request=TicketAttachmentUploadSerializer,
+        methods=["GET"],
+        request=None,
         responses=TicketAttachmentSerializer(many=True),
+        description="List attachment metadata without generating download URLs.",
+    )
+    @extend_schema(
+        methods=["POST"],
+        request=TicketAttachmentUploadSerializer,
+        responses={status.HTTP_201_CREATED: TicketAttachmentSerializer},
+        description="Upload one validated file to private object storage.",
     )
     @action(detail=True, methods=["get", "post"], parser_classes=[MultiPartParser])
     def attachments(self, request, **kwargs):
@@ -201,6 +236,7 @@ class TicketViewSet(
         request=None,
         responses=None,
         parameters=[OpenApiParameter("attachment_id", OpenApiTypes.UUID, OpenApiParameter.PATH)],
+        description="Delete attachment metadata and schedule object cleanup after commit.",
     )
     @action(
         detail=True,
@@ -224,6 +260,7 @@ class TicketViewSet(
         request=None,
         responses=TicketAttachmentDownloadSerializer,
         parameters=[OpenApiParameter("attachment_id", OpenApiTypes.UUID, OpenApiParameter.PATH)],
+        description="Create a short-lived presigned download URL for an authorized attachment.",
     )
     @action(
         detail=True,
@@ -242,7 +279,10 @@ class TicketViewSet(
 class TicketMetricsView(APIView):
     permission_classes = [IsOperator]
 
-    @extend_schema(responses=dict)
+    @extend_schema(
+        responses=dict,
+        description="Return ticket counts, SLA breach totals, and average response timings.",
+    )
     def get(self, request):
         response_time = ExpressionWrapper(
             F("first_responded_at") - F("created_at"), output_field=DurationField()
