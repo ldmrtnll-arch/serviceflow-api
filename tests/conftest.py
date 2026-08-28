@@ -3,11 +3,45 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.tickets.models import SLAPolicy, Ticket, TicketCategory
+from apps.tickets.object_storage import PresignedDownload
 
 
 @pytest.fixture
 def api_client():
     return APIClient()
+
+
+class FakeObjectStorage:
+    def __init__(self):
+        self.objects = {}
+        self.deleted = []
+        self.upload_error = None
+        self.delete_error = None
+        self.on_upload = None
+
+    def upload(self, *, key, file_obj, content_type):
+        if self.upload_error:
+            raise self.upload_error
+        self.objects[key] = {"content": file_obj.read(), "content_type": content_type}
+        file_obj.seek(0)
+        if self.on_upload:
+            self.on_upload()
+
+    def delete(self, *, key):
+        if self.delete_error:
+            raise self.delete_error
+        self.deleted.append(key)
+        self.objects.pop(key, None)
+
+    def generate_download_url(self, *, key, filename):
+        return PresignedDownload(
+            url=f"http://storage.local/{key}?filename={filename}", expires_in=300
+        )
+
+
+@pytest.fixture
+def fake_storage():
+    return FakeObjectStorage()
 
 
 @pytest.fixture

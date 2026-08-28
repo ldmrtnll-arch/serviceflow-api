@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import SLAPolicy, Ticket, TicketCategory, TicketComment, TicketHistory
+from .models import (
+    SLAPolicy,
+    Ticket,
+    TicketAttachment,
+    TicketCategory,
+    TicketComment,
+    TicketHistory,
+)
 
 
 @admin.register(TicketCategory)
@@ -50,6 +57,35 @@ class TicketCommentAdmin(admin.ModelAdmin):
     list_display = ("ticket", "author", "created_at")
     search_fields = ("content", "author__email", "ticket__title")
     list_select_related = ("ticket", "author")
+
+
+@admin.register(TicketAttachment)
+class TicketAttachmentAdmin(admin.ModelAdmin):
+    list_display = (
+        "public_id",
+        "original_name",
+        "ticket",
+        "uploaded_by",
+        "size_bytes",
+        "created_at",
+    )
+    search_fields = ("public_id", "original_name", "sha256", "ticket__title", "uploaded_by__email")
+    list_filter = ("content_type", "created_at")
+    list_select_related = ("ticket", "uploaded_by")
+    readonly_fields = (
+        "public_id",
+        "ticket",
+        "uploaded_by",
+        "original_name",
+        "storage_key",
+        "content_type",
+        "size_bytes",
+        "sha256",
+        "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(TicketHistory)

@@ -3,7 +3,14 @@ from rest_framework import serializers
 
 from apps.accounts.models import User
 
-from .models import SLAPolicy, Ticket, TicketCategory, TicketComment, TicketHistory
+from .models import (
+    SLAPolicy,
+    Ticket,
+    TicketAttachment,
+    TicketCategory,
+    TicketComment,
+    TicketHistory,
+)
 
 
 class UserBriefSerializer(serializers.ModelSerializer):
@@ -104,6 +111,7 @@ class TicketSLASerializer(serializers.Serializer):
 
 class TicketDetailSerializer(TicketListSerializer):
     sla = serializers.SerializerMethodField()
+    attachment_count = serializers.SerializerMethodField()
 
     @extend_schema_field(TicketSLASerializer)
     def get_sla(self, obj):
@@ -122,6 +130,11 @@ class TicketDetailSerializer(TicketListSerializer):
             },
         }
 
+    @extend_schema_field(serializers.IntegerField)
+    def get_attachment_count(self, obj):
+        annotated = getattr(obj, "attachment_count", None)
+        return annotated if annotated is not None else obj.attachments.count()
+
     class Meta(TicketListSerializer.Meta):
         fields = TicketListSerializer.Meta.fields + (
             "description",
@@ -134,6 +147,7 @@ class TicketDetailSerializer(TicketListSerializer):
             "sla_first_response_breached_at",
             "sla_resolution_breached_at",
             "sla",
+            "attachment_count",
         )
 
 
@@ -197,3 +211,30 @@ class TicketHistorySerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = fields
+
+
+class TicketAttachmentSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source="public_id", read_only=True)
+    uploaded_by = UserBriefSerializer(read_only=True)
+
+    class Meta:
+        model = TicketAttachment
+        fields = (
+            "id",
+            "original_name",
+            "content_type",
+            "size_bytes",
+            "sha256",
+            "uploaded_by",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class TicketAttachmentUploadSerializer(serializers.Serializer):
+    file = serializers.FileField(write_only=True)
+
+
+class TicketAttachmentDownloadSerializer(serializers.Serializer):
+    url = serializers.URLField()
+    expires_in = serializers.IntegerField()

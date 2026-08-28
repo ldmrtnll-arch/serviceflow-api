@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 
 from django.db import transaction
@@ -14,6 +15,8 @@ from .exceptions import (
 from .models import Ticket, TicketComment, TicketHistory
 from .sla import apply_sla_policy, recalculate_sla_deadlines, resolve_sla_policy
 from .tasks import notify_ticket_event
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_TRANSITIONS = {
     Ticket.Status.OPEN: {Ticket.Status.IN_PROGRESS, Ticket.Status.CANCELLED},
@@ -34,7 +37,18 @@ ALLOWED_TRANSITIONS = {
 
 
 def _notify_after_commit(ticket: Ticket, event: str) -> None:
-    transaction.on_commit(lambda: notify_ticket_event.delay(ticket.pk, event))
+    ticket_id = ticket.pk
+
+    def publish() -> None:
+        try:
+            notify_ticket_event.delay(ticket_id, event)
+        except Exception:
+            logger.exception(
+                "ticket_notification_publish_failed",
+                extra={"ticket_id": ticket_id, "ticket_event": event},
+            )
+
+    transaction.on_commit(publish)
 
 
 def _history(ticket, actor, action, field="", old_value="", new_value=""):

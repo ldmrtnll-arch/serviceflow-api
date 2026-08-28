@@ -6,8 +6,13 @@ __pycache__/
 venv/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
+locust_*.csv
+*_stats.csv
+*_failures.csv
+*_exceptions.csv
 dist/
 build/
 *.egg-info/
