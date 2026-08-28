@@ -11,7 +11,9 @@ def env_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "unsafe-development-only-key")
+SECRET_KEY = os.getenv(
+    "DJANGO_SECRET_KEY", "unsafe-development-only-key-change-me-before-production"
+)
 DEBUG = env_bool("DJANGO_DEBUG")
 ALLOWED_HOSTS = [v.strip() for v in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost").split(",")]
 
@@ -30,6 +32,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "config.middleware.RequestObservabilityMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -58,8 +61,21 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}", conn_max_age=60
+        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        conn_max_age=int(os.getenv("DB_CONN_MAX_AGE", "60")),
     )
+}
+
+CACHE_URL = os.getenv("CACHE_URL", "redis://localhost:6379/1")
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": CACHE_URL,
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True,
+        },
+    }
 }
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -91,6 +107,17 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 20,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "config.exceptions.api_exception_handler",
+    "DEFAULT_THROTTLE_CLASSES": (
+        "config.throttling.ResilientAnonRateThrottle",
+        "config.throttling.ResilientUserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.getenv("THROTTLE_ANON_RATE", "100/hour"),
+        "user": os.getenv("THROTTLE_USER_RATE", "1000/hour"),
+        "login": os.getenv("THROTTLE_LOGIN_RATE", "10/minute"),
+        "register": os.getenv("THROTTLE_REGISTER_RATE", "5/minute"),
+        "upload": os.getenv("THROTTLE_UPLOAD_RATE", "30/hour"),
+    },
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
@@ -107,6 +134,7 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
 CELERY_TASK_ALWAYS_EAGER = env_bool("CELERY_TASK_ALWAYS_EAGER", True)
 CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 CELERY_BEAT_SCHEDULE = {
     "check-sla-breaches-every-minute": {
         "task": "apps.tickets.tasks.check_sla_breaches",
@@ -122,4 +150,28 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "serviceflow-attachments")
 S3_REGION_NAME = os.getenv("S3_REGION_NAME", "us-east-1")
 S3_PRESIGNED_URL_EXPIRATION = int(os.getenv("S3_PRESIGNED_URL_EXPIRATION", "300"))
 MAX_ATTACHMENT_SIZE_BYTES = int(os.getenv("MAX_ATTACHMENT_SIZE_BYTES", "10485760"))
+S3_CONNECT_TIMEOUT_SECONDS = int(os.getenv("S3_CONNECT_TIMEOUT_SECONDS", "3"))
+S3_READ_TIMEOUT_SECONDS = int(os.getenv("S3_READ_TIMEOUT_SECONDS", "10"))
+S3_MAX_ATTEMPTS = int(os.getenv("S3_MAX_ATTEMPTS", "3"))
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_ATTACHMENT_SIZE_BYTES + 1024 * 1024
+
+SLOW_REQUEST_THRESHOLD_MS = int(os.getenv("SLOW_REQUEST_THRESHOLD_MS", "500"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"request_id": {"()": "config.observability.RequestIDFilter"}},
+    "formatters": {"json": {"()": "config.observability.JsonFormatter"}},
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "filters": ["request_id"],
+            "formatter": "json",
+        }
+    },
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
+    "loggers": {
+        "django.server": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "botocore": {"level": "WARNING"},
+    },
+}

@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import User
+from config.throttling import UploadRateThrottle
 
 from .attachments import delete_attachment, upload_attachment
 from .filters import TicketFilter
@@ -72,6 +73,11 @@ class TicketViewSet(
     filterset_class = TicketFilter
     search_fields = ("title", "description")
     ordering_fields = ("created_at", "updated_at", "priority", "status")
+
+    def get_throttles(self):
+        if self.action == "attachments" and self.request.method == "POST":
+            return [UploadRateThrottle()]
+        return super().get_throttles()
 
     def get_queryset(self) -> QuerySet[Ticket]:
         queryset = (

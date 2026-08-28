@@ -25,7 +25,13 @@ class S3ObjectStorage:
             "aws_access_key_id": settings.S3_ACCESS_KEY_ID,
             "aws_secret_access_key": settings.S3_SECRET_ACCESS_KEY,
             "region_name": settings.S3_REGION_NAME,
-            "config": Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+            "config": Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                connect_timeout=settings.S3_CONNECT_TIMEOUT_SECONDS,
+                read_timeout=settings.S3_READ_TIMEOUT_SECONDS,
+                retries={"mode": "adaptive", "max_attempts": settings.S3_MAX_ATTEMPTS},
+            ),
         }
         self.bucket = settings.S3_BUCKET_NAME
         self.expiration = settings.S3_PRESIGNED_URL_EXPIRATION
